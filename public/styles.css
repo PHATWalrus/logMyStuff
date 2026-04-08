@@ -207,6 +207,19 @@ select {
   gap: 0.9rem;
 }
 
+.raw-log-view {
+  margin: 0;
+  min-height: 360px;
+  padding: 1rem;
+  overflow: auto;
+  border-radius: 20px;
+  background: #241b15;
+  color: #f7efe7;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .log-card {
   padding: 1rem;
   background: var(--surface-strong);

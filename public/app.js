@@ -1,5 +1,8 @@
 const state = {
-  socket: null
+  pending: new Map(),
+  reconnectTimer: null,
+  socket: null,
+  viewMode: "cards"
 };
 
 const elements = {
@@ -20,6 +23,8 @@ const elements = {
   statusPill: document.getElementById("statusPill"),
   storageDriver: document.getElementById("storageDriver"),
   totalLogs: document.getElementById("totalLogs"),
+  rawLogView: document.getElementById("rawLogView"),
+  viewModeButton: document.getElementById("viewModeButton"),
   visibleLogs: document.getElementById("visibleLogs")
 };
 
@@ -46,6 +51,14 @@ function setStatus(label, mode = "idle") {
   elements.statusPill.dataset.mode = mode;
 }
 
+function setViewMode(mode) {
+  state.viewMode = mode;
+  const isRaw = mode === "raw";
+  elements.viewModeButton.textContent = `View: ${isRaw ? "Raw" : "Cards"}`;
+  elements.logList.classList.toggle("hidden", isRaw);
+  elements.rawLogView.classList.toggle("hidden", !isRaw);
+}
+
 function formatDate(value) {
   const date = new Date(value);
   return new Intl.DateTimeFormat(undefined, {
@@ -55,8 +68,9 @@ function formatDate(value) {
 }
 
 function renderLogs(logs) {
-  elements.logList.innerHTML = "";
   elements.emptyState.classList.toggle("hidden", logs.length > 0);
+  elements.logList.innerHTML = "";
+  elements.rawLogView.textContent = logs.map((log) => JSON.stringify(log)).join("\n");
 
   for (const log of logs) {
     const node = elements.logTemplate.content.firstElementChild.cloneNode(true);
@@ -86,14 +100,7 @@ function renderLogs(logs) {
   }
 }
 
-async function fetchLogs() {
-  setStatus("Refreshing", "loading");
-  const response = await fetch(`/api/logs?${getQuery().toString()}`);
-  if (!response.ok) {
-    throw new Error(`Request failed with ${response.status}`);
-  }
-
-  const payload = await response.json();
+function applySnapshot(payload) {
   renderLogs(payload.logs);
   elements.storageDriver.textContent = payload.store.driver;
   elements.totalLogs.textContent = String(payload.totalLogs);
@@ -102,9 +109,55 @@ async function fetchLogs() {
   setStatus("Live", "ok");
 }
 
+function nextRequestId() {
+  return `${Date.now()}-${crypto.randomUUID()}`;
+}
+
+function setSocketStatus(label) {
+  elements.socketStatusButton.textContent = `Socket: ${label}`;
+}
+
+function sendSocketMessage(message, { expectReply = false, timeoutMs = 6000 } = {}) {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new Error("Socket is not connected."));
+  }
+
+  const payload = { ...message };
+  if (!payload.requestId) {
+    payload.requestId = nextRequestId();
+  }
+
+  state.socket.send(JSON.stringify(payload));
+
+  if (!expectReply) {
+    return Promise.resolve(payload.requestId);
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      state.pending.delete(payload.requestId);
+      reject(new Error("Socket request timed out."));
+    }, timeoutMs);
+
+    state.pending.set(payload.requestId, {
+      resolve,
+      reject,
+      timer
+    });
+  });
+}
+
 async function refreshNow() {
   try {
-    await fetchLogs();
+    setStatus("Refreshing", "loading");
+    const payload = await sendSocketMessage(
+      {
+        type: "get_logs",
+        ...Object.fromEntries(getQuery())
+      },
+      { expectReply: true }
+    );
+    applySnapshot(payload);
   } catch (error) {
     console.error(error);
     setStatus("Offline", "error");
@@ -112,13 +165,35 @@ async function refreshNow() {
   }
 }
 
-function setSocketStatus(label) {
-  elements.socketStatusButton.textContent = `Socket: ${label}`;
+function downloadFile(filename, mimeType, content) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
-function exportLogs(format) {
-  const url = `/api/logs/export?${getQuery().toString()}&format=${format}`;
-  window.open(url, "_blank", "noopener,noreferrer");
+async function exportLogs(format) {
+  try {
+    setStatus("Exporting", "loading");
+    const payload = await sendSocketMessage(
+      {
+        type: "export_logs",
+        format,
+        ...Object.fromEntries(getQuery())
+      },
+      { expectReply: true, timeoutMs: 10000 }
+    );
+    downloadFile(payload.filename, payload.mimeType, payload.content);
+    setStatus("Live", "ok");
+  } catch (error) {
+    console.error(error);
+    setStatus("Export failed", "error");
+  }
 }
 
 function connectSocket() {
@@ -134,28 +209,65 @@ function connectSocket() {
   socket.addEventListener("open", () => {
     setSocketStatus("Live");
     setStatus("Live", "ok");
+    window.clearTimeout(state.reconnectTimer);
+    refreshNow();
   });
 
-  socket.addEventListener("message", async (event) => {
+  socket.addEventListener("message", (event) => {
     try {
       const payload = JSON.parse(event.data);
+      if (payload.requestId && state.pending.has(payload.requestId)) {
+        const pending = state.pending.get(payload.requestId);
+        window.clearTimeout(pending.timer);
+        state.pending.delete(payload.requestId);
+
+        if (payload.type === "error") {
+          pending.reject(new Error(payload.error || "Socket request failed."));
+          return;
+        }
+
+        pending.resolve(payload);
+        return;
+      }
+
       if (payload.totalLogs !== undefined) {
         elements.totalLogs.textContent = String(payload.totalLogs);
       }
       if (payload.store?.driver) {
         elements.storageDriver.textContent = payload.store.driver;
       }
+
+      if (payload.type === "snapshot") {
+        applySnapshot(payload);
+        return;
+      }
+
+      if (payload.type === "invalidate") {
+        refreshNow();
+        return;
+      }
+
+      if (payload.type === "connected") {
+        return;
+      }
+
+      if (payload.type === "cleared") {
+        refreshNow();
+      }
     } catch (error) {
       console.warn("Unable to parse socket payload", error);
     }
-
-    await refreshNow();
   });
 
   socket.addEventListener("close", () => {
     setSocketStatus("Retrying");
     setStatus("Reconnecting", "loading");
-    window.setTimeout(connectSocket, 1500);
+    for (const pending of state.pending.values()) {
+      window.clearTimeout(pending.timer);
+      pending.reject(new Error("Socket disconnected."));
+    }
+    state.pending.clear();
+    state.reconnectTimer = window.setTimeout(connectSocket, 1500);
   });
 
   socket.addEventListener("error", () => {
@@ -165,19 +277,23 @@ function connectSocket() {
 }
 
 elements.refreshButton.addEventListener("click", refreshNow);
+elements.viewModeButton.addEventListener("click", () => {
+  setViewMode(state.viewMode === "cards" ? "raw" : "cards");
+});
 elements.exportJsonButton.addEventListener("click", () => exportLogs("json"));
 elements.exportCsvButton.addEventListener("click", () => exportLogs("csv"));
 elements.clearButton.addEventListener("click", async () => {
   const confirmed = window.confirm("Clear all stored logs?");
   if (!confirmed) return;
 
-  setStatus("Clearing", "loading");
-  const response = await fetch("/api/logs", { method: "DELETE" });
-  if (!response.ok) {
+  try {
+    setStatus("Clearing", "loading");
+    await sendSocketMessage({ type: "clear_logs" }, { expectReply: true });
+    await refreshNow();
+  } catch (error) {
+    console.error(error);
     setStatus("Clear failed", "error");
-    return;
   }
-  await refreshNow();
 });
 
 for (const element of [
@@ -190,5 +306,5 @@ for (const element of [
   element.addEventListener("change", refreshNow);
 }
 
-refreshNow();
+setViewMode("cards");
 connectSocket();

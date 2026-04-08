@@ -158,6 +158,16 @@ function parseQuery(url: URL) {
   return { limit, level, source, search };
 }
 
+function parseSocketQuery(payload: Record<string, unknown>) {
+  const rawLimit = Number(payload.limit ?? 250);
+  return {
+    limit: Math.max(1, Math.min(1000, Number.isFinite(rawLimit) ? rawLimit : 250)),
+    level: typeof payload.level === "string" && payload.level.trim() ? payload.level.trim() : undefined,
+    source: typeof payload.source === "string" && payload.source.trim() ? payload.source.trim() : undefined,
+    search: typeof payload.search === "string" && payload.search.trim() ? payload.search.trim() : undefined
+  };
+}
+
 function toCsv(logs: LogEntry[]): string {
   const header = ["timestamp", "level", "source", "message", "hostname", "tags", "metadata"];
   const rows = logs.map((log) =>
@@ -190,6 +200,20 @@ async function serveStatic(pathname: string): Promise<Response> {
   return new Response(file, { headers });
 }
 
+async function buildSnapshot(payload: Record<string, unknown> = {}) {
+  const query = parseSocketQuery(payload);
+  const logs = await store.list(query);
+  return {
+    type: "snapshot",
+    requestId: typeof payload.requestId === "string" ? payload.requestId : undefined,
+    query,
+    totalLogs: await store.count(),
+    visibleLogs: logs.length,
+    store: await store.info(),
+    logs
+  };
+}
+
 const server = Bun.serve({
   port,
   idleTimeout: 30,
@@ -216,8 +240,74 @@ const server = Bun.serve({
         })
       );
     },
-    message() {
-      // The dashboard only consumes server-pushed events for now.
+    async message(ws, rawMessage) {
+      try {
+        const message = JSON.parse(String(rawMessage)) as Record<string, unknown>;
+        const type = typeof message.type === "string" ? message.type : "";
+
+        if (type === "get_logs") {
+          ws.send(JSON.stringify(await buildSnapshot(message)));
+          return;
+        }
+
+        if (type === "clear_logs") {
+          const cleared = await store.clear();
+          const totalLogs = await store.count();
+          ws.send(
+            JSON.stringify({
+              type: "cleared",
+              requestId: typeof message.requestId === "string" ? message.requestId : undefined,
+              cleared,
+              totalLogs
+            })
+          );
+          server.publish(
+            logTopic,
+            JSON.stringify({
+              type: "invalidate",
+              reason: "cleared",
+              totalLogs
+            })
+          );
+          return;
+        }
+
+        if (type === "export_logs") {
+          const query = parseSocketQuery(message);
+          const logs = await store.list({
+            ...query,
+            limit: 5000
+          });
+          const format = message.format === "csv" ? "csv" : "json";
+          const content = format === "csv" ? toCsv(logs) : JSON.stringify(logs, null, 2);
+          ws.send(
+            JSON.stringify({
+              type: "exported",
+              requestId: typeof message.requestId === "string" ? message.requestId : undefined,
+              format,
+              filename: `logs-${Date.now()}.${format}`,
+              mimeType: format === "csv" ? "text/csv;charset=utf-8" : "application/json;charset=utf-8",
+              content
+            })
+          );
+          return;
+        }
+
+        ws.send(
+          JSON.stringify({
+            type: "error",
+            requestId: typeof message.requestId === "string" ? message.requestId : undefined,
+            error: "Unknown socket action."
+          })
+        );
+      } catch (error) {
+        ws.send(
+          JSON.stringify({
+            type: "error",
+            error: error instanceof Error ? error.message : "Invalid socket payload."
+          })
+        );
+      }
     }
   },
   async fetch(request) {
@@ -262,7 +352,8 @@ const server = Bun.serve({
           server.publish(
             logTopic,
             JSON.stringify({
-              type: "ingested",
+              type: "invalidate",
+              reason: "ingested",
               inserted: logs.length,
               totalLogs
             })
@@ -283,7 +374,8 @@ const server = Bun.serve({
         server.publish(
           logTopic,
           JSON.stringify({
-            type: "ingested",
+            type: "invalidate",
+            reason: "ingested",
             inserted: logs.length,
             totalLogs
           })
@@ -327,9 +419,10 @@ const server = Bun.serve({
       server.publish(
         logTopic,
         JSON.stringify({
-          type: "cleared",
+          type: "invalidate",
+          reason: "cleared",
           cleared,
-          totalLogs: 0
+          totalLogs: await store.count()
         })
       );
       return json({

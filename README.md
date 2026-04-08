@@ -7,6 +7,8 @@ A Bun-based logging server with a built-in dashboard for viewing, filtering, cle
 - Single ingestion endpoint at `POST /api/logs`
 - Built-in UI at `/`
 - WebSocket live updates for the dashboard at `/ws`
+- Dashboard actions use WebSockets for refresh, filter, clear, and export
+- Toggle between card view and raw JSON line view in the UI
 - Memory storage by default
 - Redis storage with env-based switch
 - Clear-all action from the UI or `DELETE /api/logs`
