@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LogMyStuff</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Bun Log Server</p>
+          <h1>Watch your logs without wiring a separate dashboard.</h1>
+          <p class="hero-copy">
+            Push logs into one endpoint, view them live, filter them fast, clear them when needed,
+            and export snapshots as JSON or CSV.
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="stat-row">
+            <span>Storage</span>
+            <strong id="storageDriver">Loading...</strong>
+          </div>
+          <div class="stat-row">
+            <span>Total logs</span>
+            <strong id="totalLogs">0</strong>
+          </div>
+          <div class="stat-row">
+            <span>Visible</span>
+            <strong id="visibleLogs">0</strong>
+          </div>
+          <div class="stat-row">
+            <span>Status</span>
+            <strong id="statusPill" class="pill">Connecting</strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="controls">
+        <div class="filters">
+          <label>
+            Search
+            <input id="searchInput" type="search" placeholder="message, source, metadata..." />
+          </label>
+          <label>
+            Level
+            <select id="levelFilter">
+              <option value="">All levels</option>
+              <option value="trace">trace</option>
+              <option value="debug">debug</option>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+              <option value="fatal">fatal</option>
+            </select>
+          </label>
+          <label>
+            Source
+            <input id="sourceFilter" type="text" placeholder="api, worker, frontend..." />
+          </label>
+          <label>
+            Limit
+            <input id="limitInput" type="number" min="1" max="1000" value="250" />
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="refreshButton" class="button secondary">Refresh</button>
+          <button id="socketStatusButton" class="button secondary">Socket: Connecting</button>
+          <button id="exportJsonButton" class="button">Export JSON</button>
+          <button id="exportCsvButton" class="button">Export CSV</button>
+          <button id="clearButton" class="button danger">Clear Logs</button>
+        </div>
+      </section>
+
+      <section class="samples">
+        <div class="sample-card">
+          <p class="sample-label">Push a log</p>
+          <pre><code id="curlExample">curl -X POST http://localhost:3000/api/logs \
+  -H "Content-Type: application/json" \
+  -d '{"level":"info","source":"demo","message":"Server booted","metadata":{"region":"in"}}'</code></pre>
+        </div>
+      </section>
+
+      <section class="list-wrap">
+        <div class="list-head">
+          <div>
+            <p class="eyebrow">Live Feed</p>
+            <h2>Recent events</h2>
+          </div>
+          <p id="lastUpdated">Waiting for first fetch…</p>
+        </div>
+
+        <div id="emptyState" class="empty-state hidden">
+          <h3>No logs yet</h3>
+          <p>Push a log to <code>/api/logs</code> and it will appear here.</p>
+        </div>
+
+        <div id="logList" class="log-list"></div>
+      </section>
+    </div>
+
+    <template id="logTemplate">
+      <article class="log-card">
+        <div class="log-top">
+          <span class="level-badge"></span>
+          <div class="log-main">
+            <h3 class="log-message"></h3>
+            <p class="log-meta"></p>
+          </div>
+        </div>
+        <div class="tag-row"></div>
+        <pre class="metadata-block"></pre>
+      </article>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+  </html>
